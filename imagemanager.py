@@ -1,11 +1,12 @@
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageEnhance
 import io
 import zipfile
 import sqlite3
 import uuid
 import os
 import base64
+import mimetypes
 try:
     from rembg import remove
     REMBG_AVAILABLE = True
@@ -95,6 +96,20 @@ def crop_image(img, crop_box):
     x, y, w, h = crop_box
     return img.crop((x, y, x+w, y+h))
 
+def rotate_image(img, angle):
+    """Rotate a PIL image by the specified angle (degrees)."""
+    return img.rotate(angle, resample=Image.BICUBIC, expand=True)
+
+def adjust_brightness(img, factor):
+    """Adjust brightness of a PIL image (factor: 0.0 to 2.0)."""
+    enhancer = ImageEnhance.Brightness(img)
+    return enhancer.enhance(factor)
+
+def adjust_contrast(img, factor):
+    """Adjust contrast of a PIL image (factor: 0.0 to 2.0)."""
+    enhancer = ImageEnhance.Contrast(img)
+    return enhancer.enhance(factor)
+
 def remove_background(img):
     """Remove background from a PIL image using rembg."""
     if not REMBG_AVAILABLE:
@@ -108,6 +123,32 @@ def remove_background(img):
     except Exception as e:
         st.warning(f"Background removal failed: {str(e)}")
         return img
+
+def apply_transformations(img, zoom_level, center_x, center_y, crop_box, rotation, brightness, contrast):
+    """Apply all transformations (zoom, crop, rotation, brightness, contrast) for preview."""
+    processed = img.copy()
+    crop_coords = None
+    if crop_box:
+        processed = crop_image(processed, crop_box)
+    else:
+        processed, crop_coords = zoom_image(processed, zoom_level, center_x, center_y)
+    processed = rotate_image(processed, rotation)
+    processed = adjust_brightness(processed, brightness)
+    processed = adjust_contrast(processed, contrast)
+    return processed, crop_coords
+
+def save_image_to_db(folder, name, img):
+    """Save a processed image to the database."""
+    img_bytes = io.BytesIO()
+    img_format = 'PNG' if img.mode == 'RGBA' else 'JPEG'
+    img.save(img_bytes, format=img_format)
+    img_bytes.seek(0)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE images SET image_data = ? WHERE folder = ? AND name = ?",
+              (img_bytes.read(), folder, name))
+    conn.commit()
+    conn.close()
 
 def init_db():
     """Initialize SQLite database with folders and images tables."""
@@ -180,7 +221,6 @@ def load_images_to_db(uploaded_files, folder, base_name):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     uploaded_count = 0
-    # Get the current max sequence for the base_name in the folder
     c.execute("SELECT MAX(sequence) FROM images WHERE folder = ? AND base_name = ?", (folder, base_name))
     max_sequence = c.fetchone()[0] or 0
     for idx, uploaded_file in enumerate(uploaded_files, start=max_sequence + 1):
@@ -286,6 +326,14 @@ if "zoom_center_y" not in st.session_state:
     st.session_state.zoom_center_y = 0.5
 if "crop_box" not in st.session_state:
     st.session_state.crop_box = None
+if "rotation" not in st.session_state:
+    st.session_state.rotation = 0.0
+if "brightness" not in st.session_state:
+    st.session_state.brightness = 1.0
+if "contrast" not in st.session_state:
+    st.session_state.contrast = 1.0
+if "preview_image" not in st.session_state:
+    st.session_state.preview_image = None
 
 # -------------------------------
 # Sidebar: Admin Controls & Upload
@@ -393,6 +441,10 @@ if st.session_state.zoom_folder is None:
                         st.session_state.zoom_center_x = 0.5
                         st.session_state.zoom_center_y = 0.5
                         st.session_state.crop_box = None
+                        st.session_state.rotation = 0.0
+                        st.session_state.brightness = 1.0
+                        st.session_state.contrast = 1.0
+                        st.session_state.preview_image = None
                         st.rerun()
                     st.image(img_dict["image"], use_container_width=True, caption=f"Photo {idx+1}")
                     st.markdown(f'<div class="image-info"><b>Name:</b> {img_dict["name"]}<br><b>Label:</b> {img_dict["label"]}</div>',
@@ -420,52 +472,91 @@ else:
     # Image Editing Controls
     col1, col2 = st.columns([3, 1])
     with col1:
-        # Display Image
-        processed_image = img_dict["image"]
-        if st.session_state.crop_box:
-            processed_image = crop_image(processed_image, st.session_state.crop_box)
+        # Display Image (Preview or Original)
+        if st.session_state.preview_image:
+            st.image(st.session_state.preview_image, use_container_width=True, caption="Preview")
         else:
-            processed_image, _ = zoom_image(
-                processed_image,
-                st.session_state.zoom_level,
-                st.session_state.zoom_center_x,
-                st.session_state.zoom_center_y
-            )
-        st.image(processed_image, use_container_width=True, caption="Processed Image")
+            st.image(img_dict["image"], use_container_width=True, caption="Original Image")
     with col2:
         # Zoom Controls
+        st.subheader("Zoom")
         zoom_level = st.slider("Zoom Level", 1.0, 5.0, st.session_state.zoom_level, key=f"zoom_{folder}_{idx}")
         center_x = st.slider("Center X", 0.0, 1.0, st.session_state.zoom_center_x, key=f"center_x_{folder}_{idx}")
         center_y = st.slider("Center Y", 0.0, 1.0, st.session_state.zoom_center_y, key=f"center_y_{folder}_{idx}")
-        if st.button("Apply Zoom", key=f"apply_zoom_{folder}_{idx}"):
+
+        # Crop Controls
+        st.subheader("Crop")
+        crop_x = st.slider("Crop X", 0, img_dict["image"].width, 0, key=f"crop_x_{folder}_{idx}")
+        crop_y = st.slider("Crop Y", 0, img_dict["image"].height, 0, key=f"crop_y_{folder}_{idx}")
+        crop_w = st.slider("Crop Width", 1, img_dict["image"].width - crop_x, 100, key=f"crop_w_{folder}_{idx}")
+        crop_h = st.slider("Crop Height", 1, img_dict["image"].height - crop_y, 100, key=f"crop_h_{folder}_{idx}")
+
+        # Rotation Control
+        st.subheader("Rotation")
+        rotation = st.slider("Rotation (degrees)", -180.0, 180.0, st.session_state.rotation, key=f"rotation_{folder}_{idx}")
+
+        # Brightness and Contrast Controls
+        st.subheader("Adjustments")
+        brightness = st.slider("Brightness", 0.0, 2.0, st.session_state.brightness, key=f"brightness_{folder}_{idx}")
+        contrast = st.slider("Contrast", 0.0, 2.0, st.session_state.contrast, key=f"contrast_{folder}_{idx}")
+
+        # Preview Button
+        if st.button("Preview", key=f"preview_{folder}_{idx}"):
+            processed, _ = apply_transformations(
+                img_dict["image"],
+                zoom_level,
+                center_x,
+                center_y,
+                (crop_x, crop_y, crop_w, crop_h) if crop_w > 0 and crop_h > 0 else None,
+                rotation,
+                brightness,
+                contrast
+            )
+            st.session_state.preview_image = processed
             st.session_state.zoom_level = zoom_level
             st.session_state.zoom_center_x = center_x
             st.session_state.zoom_center_y = center_y
-            st.session_state.crop_box = None
+            st.session_state.crop_box = (crop_x, crop_y, crop_w, crop_h) if crop_w > 0 and crop_h > 0 else None
+            st.session_state.rotation = rotation
+            st.session_state.brightness = brightness
+            st.session_state.contrast = contrast
             st.rerun()
 
-        # Crop Controls
-        crop_x = st.number_input("Crop X", 0, img_dict["image"].width, 0, key=f"crop_x_{folder}_{idx}")
-        crop_y = st.number_input("Crop Y", 0, img_dict["image"].height, 0, key=f"crop_y_{folder}_{idx}")
-        crop_w = st.number_input("Crop Width", 1, img_dict["image"].width - crop_x, 100, key=f"crop_w_{folder}_{idx}")
-        crop_h = st.number_input("Crop Height", 1, img_dict["image"].height - crop_y, 100, key=f"crop_h_{folder}_{idx}")
-        if st.button("Apply Crop", key=f"crop_{folder}_{idx}"):
-            st.session_state.crop_box = (crop_x, crop_y, crop_w, crop_h)
+        # Apply Changes Button
+        if st.button("Apply Changes", key=f"apply_{folder}_{idx}"):
+            processed, _ = apply_transformations(
+                img_dict["image"],
+                zoom_level,
+                center_x,
+                center_y,
+                (crop_x, crop_y, crop_w, crop_h) if crop_w > 0 and crop_h > 0 else None,
+                rotation,
+                brightness,
+                contrast
+            )
+            save_image_to_db(folder, img_dict["name"], processed)
+            st.session_state.preview_image = None
+            st.success("Changes applied and saved to database.")
+            st.rerun()
+
+        # Reset Button
+        if st.button("Reset", key=f"reset_{folder}_{idx}"):
             st.session_state.zoom_level = 1.0
+            st.session_state.zoom_center_x = 0.5
+            st.session_state.zoom_center_y = 0.5
+            st.session_state.crop_box = None
+            st.session_state.rotation = 0.0
+            st.session_state.brightness = 1.0
+            st.session_state.contrast = 1.0
+            st.session_state.preview_image = None
             st.rerun()
 
         # Background Removal
         if st.button("Remove Background", key=f"remove_bg_{folder}_{idx}"):
-            processed_image = remove_background(img_dict["image"])
-            img_bytes = io.BytesIO()
-            processed_image.save(img_bytes, format='PNG')
-            img_bytes.seek(0)
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("UPDATE images SET image_data = ? WHERE folder = ? AND name = ?",
-                      (img_bytes.read(), folder, img_dict["name"]))
-            conn.commit()
-            conn.close()
+            processed = remove_background(img_dict["image"])
+            save_image_to_db(folder, img_dict["name"], processed)
+            st.session_state.preview_image = None
+            st.success("Background removed and saved.")
             st.rerun()
 
     # Label and Classify
@@ -517,6 +608,10 @@ else:
             st.session_state.zoom_center_x = 0.5
             st.session_state.zoom_center_y = 0.5
             st.session_state.crop_box = None
+            st.session_state.rotation = 0.0
+            st.session_state.brightness = 1.0
+            st.session_state.contrast = 1.0
+            st.session_state.preview_image = None
             st.rerun()
     with col3:
         if idx < len(images)-1 and st.button("Next ►", key=f"next_{folder}_{idx}"):
@@ -525,6 +620,10 @@ else:
             st.session_state.zoom_center_x = 0.5
             st.session_state.zoom_center_y = 0.5
             st.session_state.crop_box = None
+            st.session_state.rotation = 0.0
+            st.session_state.brightness = 1.0
+            st.session_state.contrast = 1.0
+            st.session_state.preview_image = None
             st.rerun()
 
     if st.button("⬅️ Back to Grid", key=f"back_{folder}_{idx}"):
@@ -534,4 +633,8 @@ else:
         st.session_state.zoom_center_x = 0.5
         st.session_state.zoom_center_y = 0.5
         st.session_state.crop_box = None
+        st.session_state.rotation = 0.0
+        st.session_state.brightness = 1.0
+        st.session_state.contrast = 1.0
+        st.session_state.preview_image = None
         st.rerun()
