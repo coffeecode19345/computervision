@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageDraw
 import io
 import zipfile
 import sqlite3
@@ -136,6 +136,15 @@ def apply_transformations(img, zoom_level, center_x, center_y, crop_box, rotatio
     processed = adjust_brightness(processed, brightness)
     processed = adjust_contrast(processed, contrast)
     return processed, crop_coords
+
+def draw_crop_overlay(img, crop_box):
+    """Draw crop border on a copy of the image."""
+    overlay_img = img.copy()
+    if crop_box:
+        draw = ImageDraw.Draw(overlay_img)
+        x, y, w, h = crop_box
+        draw.rectangle((x, y, x + w, y + h), outline=(255, 0, 0), width=5)
+    return overlay_img
 
 def save_image_to_db(folder, name, img):
     """Save a processed image to the database."""
@@ -334,6 +343,8 @@ if "contrast" not in st.session_state:
     st.session_state.contrast = 1.0
 if "preview_image" not in st.session_state:
     st.session_state.preview_image = None
+if "crop_preview_image" not in st.session_state:
+    st.session_state.crop_preview_image = None
 
 # -------------------------------
 # Sidebar: Admin Controls & Upload
@@ -445,6 +456,7 @@ if st.session_state.zoom_folder is None:
                         st.session_state.brightness = 1.0
                         st.session_state.contrast = 1.0
                         st.session_state.preview_image = None
+                        st.session_state.crop_preview_image = None
                         st.rerun()
                     st.image(img_dict["image"], use_container_width=True, caption=f"Photo {idx+1}")
                     st.markdown(f'<div class="image-info"><b>Name:</b> {img_dict["name"]}<br><b>Label:</b> {img_dict["label"]}</div>',
@@ -477,6 +489,9 @@ else:
             st.image(st.session_state.preview_image, use_container_width=True, caption="Preview")
         else:
             st.image(img_dict["image"], use_container_width=True, caption="Original Image")
+        # Display Crop Preview if available
+        if st.session_state.crop_preview_image:
+            st.image(st.session_state.crop_preview_image, use_container_width=True, caption="Crop Preview with Borders")
     with col2:
         # Zoom Controls
         st.subheader("Zoom")
@@ -486,10 +501,17 @@ else:
 
         # Crop Controls
         st.subheader("Crop")
+        st.markdown("Crop X and Crop Y are the coordinates starting at the top-left corner (0,0). Crop Width and Height are the distances (in pixels) relative to these X and Y coordinates.")
         crop_x = st.slider("Crop X", 0, img_dict["image"].width, 0, key=f"crop_x_{folder}_{idx}")
         crop_y = st.slider("Crop Y", 0, img_dict["image"].height, 0, key=f"crop_y_{folder}_{idx}")
         crop_w = st.slider("Crop Width", 1, img_dict["image"].width - crop_x, 100, key=f"crop_w_{folder}_{idx}")
         crop_h = st.slider("Crop Height", 1, img_dict["image"].height - crop_y, 100, key=f"crop_h_{folder}_{idx}")
+
+        # Preview Crop Button
+        if st.button("Preview Crop", key=f"preview_crop_{folder}_{idx}"):
+            crop_box_temp = (crop_x, crop_y, crop_w, crop_h) if crop_w > 0 and crop_h > 0 else None
+            st.session_state.crop_preview_image = draw_crop_overlay(img_dict["image"], crop_box_temp)
+            st.rerun()
 
         # Rotation Control
         st.subheader("Rotation")
@@ -536,6 +558,7 @@ else:
             )
             save_image_to_db(folder, img_dict["name"], processed)
             st.session_state.preview_image = None
+            st.session_state.crop_preview_image = None
             st.success("Changes applied and saved to database.")
             st.rerun()
 
@@ -549,6 +572,7 @@ else:
             st.session_state.brightness = 1.0
             st.session_state.contrast = 1.0
             st.session_state.preview_image = None
+            st.session_state.crop_preview_image = None
             st.rerun()
 
         # Background Removal
@@ -556,8 +580,17 @@ else:
             processed = remove_background(img_dict["image"])
             save_image_to_db(folder, img_dict["name"], processed)
             st.session_state.preview_image = None
+            st.session_state.crop_preview_image = None
             st.success("Background removed and saved.")
             st.rerun()
+
+        # Mole Removal (Placeholder - not implemented as it's not easy without additional AI libraries)
+        if st.button("Remove Mole", key=f"remove_mole_{folder}_{idx}"):
+            st.warning("Mole removal is not implemented. It requires advanced AI models which are not easily integrated here.")
+
+        # Cloth Removal (Placeholder - not implemented as it's not easy and potentially sensitive)
+        if st.button("Remove Cloth", key=f"remove_cloth_{folder}_{idx}"):
+            st.warning("Cloth removal is not implemented. It requires complex AI models which are not easily integrated here.")
 
     # Label and Classify
     label = st.text_input("Label", value=img_dict["label"], key=f"label_{folder}_{idx}")
@@ -612,6 +645,7 @@ else:
             st.session_state.brightness = 1.0
             st.session_state.contrast = 1.0
             st.session_state.preview_image = None
+            st.session_state.crop_preview_image = None
             st.rerun()
     with col3:
         if idx < len(images)-1 and st.button("Next ►", key=f"next_{folder}_{idx}"):
@@ -624,6 +658,7 @@ else:
             st.session_state.brightness = 1.0
             st.session_state.contrast = 1.0
             st.session_state.preview_image = None
+            st.session_state.crop_preview_image = None
             st.rerun()
 
     if st.button("⬅️ Back to Grid", key=f"back_{folder}_{idx}"):
@@ -637,4 +672,5 @@ else:
         st.session_state.brightness = 1.0
         st.session_state.contrast = 1.0
         st.session_state.preview_image = None
+        st.session_state.crop_preview_image = None
         st.rerun()
