@@ -4,3 +4,4 @@ rembg>=2.0.0
 onnxruntime>=1.18.1
 selenium
 webdriver-manager
+torch
